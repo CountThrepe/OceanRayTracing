@@ -18,12 +18,21 @@ The roughness was somewhat of a challenge to implement. I ended using quaternion
 
 Note: I am currently having a bug with roughness and refraction combined where roughness doesn't affect the refracted image of something. I wasn't able to figure this out before turning it in.
 
-Key bindings
+Key bindings:
+
   ESC        Exit
+  
   arrows     Change view angle
+  
   PgDn/PgUp  Zoom in and out
+  
   0          Reset view angle
+  
   r/R        Increase/decrease rays per pixel (anti-aliasing and more detail to water in the distance)
+  
   p/P        Increase/decrease passes (bounces)
+  
   g/G        Increase/decrease roughness of water
+  
   i/I        Increase/decrease refractive index of water
+  
