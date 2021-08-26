@@ -1,7 +1,4 @@
-Final: Ocean
-Nathan Howard
-
-Run 'make' then 'ocean' to run my program.
+A custom ray tracing engine depicting an ocean, written for my advanced computer graphics final.
 
 When you open the program, you will see a water effect, and directly behind you there are three spheres which demonstrate various material properties. In this real time ray tracing program, I have implemented reflections, refractions, and roughness, in addition to the water effect.
 
