@@ -1,0 +1,335 @@
+#version 430
+
+uniform float time;
+uniform sampler2D skybox;
+uniform vec2 dimensions;
+uniform vec2[13] pixelNoise;
+uniform int raysPerPixel;
+
+// Lighting parameters
+uniform int nPasses;
+uniform float ambient;
+uniform float waterRoughness;
+uniform float refrIndex;
+uniform int ref;
+
+uniform mat4 cameraToWorldMat;
+uniform mat4 cameraInverseProjectionMat;
+
+layout(local_size_x = 1, local_size_y = 1) in;
+layout(rgba32f, binding = 1) uniform image2D imgOut;
+
+#define PI 3.1415926538
+
+const float thL = 0, phL = PI / 29;
+const vec3 directionalLight = vec3(0, -sin(phL), cos(phL));
+
+// ----- Utility Functions ----- //
+vec4 quatMult(vec4 q1, vec4 q2) {
+   vec4 q;
+   q.x = (q1.w * q2.x) + (q1.x * q2.w) + (q1.y * q2.z) - (q1.z * q2.y);
+   q.y = (q1.w * q2.y) - (q1.x * q2.z) + (q1.y * q2.w) + (q1.z * q2.x);
+   q.z = (q1.w * q2.z) + (q1.x * q2.y) - (q1.y * q2.x) + (q1.z * q2.w);
+   q.w = (q1.w * q2.w) - (q1.x * q2.x) - (q1.y * q2.y) - (q1.z * q2.z);
+   return q;
+}
+
+vec3 rotateVector(vec3 point, vec3 axis, float angle) {
+   // Create pure quaternion from point
+   vec4 p = vec4(point, 0);
+
+   // Create quaternion from axis and angle
+   vec4 q;
+   float half_angle = -angle * 0.5;
+   q.x = axis.x * sin(half_angle);
+   q.y = axis.y * sin(half_angle);
+   q.z = axis.z * sin(half_angle);
+   q.w = cos(half_angle);
+
+   // Get inverse of q
+   vec4 qInv = q;
+   qInv.xyz *= -1;
+
+   // Multiply quaternions
+   vec4 rotP = quatMult(quatMult(q, p), qInv);
+
+   return rotP.xyz;
+}
+
+// Returns a random float between 0 and 1.
+float rand(float seed) {
+   return mod(pow((mod(seed, 5) / 2.5) + 4, 8), 1);
+}
+
+vec3 randomlyRotateVector(vec3 v, float radius) {
+   if(radius == 0) return v;
+
+   float phi = ((2 * rand(v.x + v.z)) - 1) * radius;
+   float theta = 2 * PI * rand(v.x + v.y);
+
+   vec3 xAxis = normalize(cross(v, vec3(0, 1, 0)));
+   vec3 yAxis = normalize(cross(v, xAxis));
+
+   vec3 axis = (xAxis * cos(theta)) + (yAxis * sin(theta));
+
+   return rotateVector(v, axis, phi);
+}
+
+struct Ray {
+   vec3 origin;
+   vec3 direction;
+   float energy;
+   float refractiveIndex;
+};
+
+Ray createRay(vec3 origin, vec3 direction) {
+   Ray ray;
+   ray.origin = origin;
+   ray.direction = direction;
+   ray.energy = 1;
+   return ray;
+}
+
+Ray createDefaultRay() {
+   return createRay(vec3(0), vec3(0));
+}
+
+Ray createCameraRay(vec2 uv) {
+   vec3 origin = vec3(cameraToWorldMat * vec4(0, 0, 0, 1));
+   vec3 direction = vec3(cameraInverseProjectionMat * vec4(uv, 0, 1));
+   direction = vec3(cameraToWorldMat * vec4(direction, 0));
+   direction = normalize(direction);
+
+   return createRay(origin, direction);
+}
+
+struct Material {
+   vec3 color;
+   float reflectiveness;
+   float refractiveness;
+   float refractiveIndex;
+   float roughness;
+};
+
+Material createMaterial(vec3 color, float refl, float refr, float refrIndex, float roughness) {
+   Material mat;
+   mat.color = color;
+   mat.reflectiveness = refl;
+   mat.refractiveness = refr;
+   mat.refractiveIndex = refrIndex;
+   mat.roughness = roughness;
+
+   return mat;
+}
+
+Material createDefaultMaterial() {
+   return createMaterial(vec3(1), 0, 0, 0, 0);
+}
+
+Material waterMat = createMaterial(vec3(1), 0.4, 0.4, 1/refrIndex, waterRoughness);
+
+struct RayHit {
+   vec3 pos;
+   float dist;
+   vec3 norm;
+   Material mat;
+};
+
+RayHit createRayHit() {
+   RayHit hit;
+   hit.pos = vec3(0);
+   hit.dist = -1;
+   hit.norm = vec3(0);
+   hit.mat = createDefaultMaterial();
+
+   return hit;
+}
+
+struct Sphere {
+   vec3 pos;
+   float radius;
+   Material mat;
+};
+
+Sphere createSphere(vec3 pos, float radius, Material mat) {
+   Sphere sphere;
+   sphere.pos = pos;
+   sphere.radius = radius;
+   sphere.mat = mat;
+
+   return sphere;
+}
+
+Sphere blankSphere = createSphere(vec3(0), 0, createDefaultMaterial());
+Sphere spheres[] = {blankSphere, blankSphere, blankSphere};
+int nSpheres = 0;
+
+void addSphere(Sphere sphere) {
+   spheres[nSpheres] = sphere;
+   nSpheres++;
+}
+
+vec3 getBackground(Ray ray) {
+   ray.direction.y = abs(ray.direction.y);
+   vec2 sphericalAngles = vec2(atan(ray.direction.x/ray.direction.z) + ((1 + (0.5 * normalize(ray.direction.z))) * PI), PI - acos(ray.direction.y / sqrt(pow(ray.direction.z, 2) + pow(ray.direction.x, 2) + pow(ray.direction.y, 2))));
+   sphericalAngles.x = mod(sphericalAngles.x - (1.272*PI), 2*PI); // Correct to put sunset at angle 0
+   vec2 texCoords = vec2(sphericalAngles.x / (2 * PI), sphericalAngles.y / PI);
+
+   return vec3(texture(skybox, texCoords));
+}
+
+vec3 getWaterNormal(vec2 pos) {
+   // First wave
+   vec2 origin = vec2(10, -50);
+   float amplitude = 0.02;
+   float period = 1;
+   float timePeriod = 0.6;
+
+   vec2 relPos = pos - origin;
+   float dist = length(relPos);
+   float c = -amplitude * cos((dist / period) - (time / timePeriod)) / dist;
+   vec2 result = relPos * c;
+
+   // Second wave
+   origin = vec2(50, 30);
+   amplitude = 0.01;
+   period = 0.8;
+   timePeriod = 0.8;
+
+   relPos = pos - origin;
+   dist = length(relPos);
+   c = -amplitude * cos((dist / period) - (time / timePeriod)) / dist;
+   result += relPos * c;
+
+   // 3rd wave
+   origin = vec2(-50, 20);
+   amplitude = 0.04;
+   period = 4.5;
+   timePeriod = 1.5;
+
+   relPos = pos - origin;
+   dist = length(relPos);
+   c = -amplitude * cos((dist / period) - (time / timePeriod)) / dist;
+   result += relPos * c;
+
+   /*
+   // Nth wave
+   origin = vec2(10, 10);
+   amplitude = 0.01;
+
+   relPos = pos - origin;
+   dist = length(relPos);
+   c = -amplitude * cos(dist) / dist;
+   result += relPos * c;
+   */
+
+   vec3 normal = vec3(result.x, 1, result.y);
+   
+   return normalize(normal);
+}
+
+void getWaterCollision(Ray ray, inout RayHit hit) {
+   float t = -ray.origin.y / ray.direction.y;
+   if(t > 0 && (hit.dist < 0 || t < hit.dist)) {
+      hit.dist = t;
+      hit.pos = ray.origin + t * ray.direction;
+      hit.norm = getWaterNormal(hit.pos.xz);
+      hit.mat = waterMat;
+
+      Ray reflectedRay = createRay(hit.pos, reflect(ray.direction, hit.norm));
+      if(reflectedRay.direction.y < 0) hit.norm.xz *= -1;
+
+      if(hit.mat.roughness != 0) hit.norm = randomlyRotateVector(hit.norm, hit.mat.roughness * 0.5 * PI);
+   }
+}
+
+void getSphereCollision(Ray ray, Sphere sphere, inout RayHit hit) {
+   vec3 pos = ray.origin - sphere.pos;
+   float p1 = -dot(ray.direction, pos);
+   float p2sqr = p1 * p1 - dot(pos, pos) + sphere.radius * sphere.radius;
+   if (p2sqr < 0) return;
+
+   float p2 = sqrt(p2sqr);
+   float t = p1 - p2 > 0 ? p1 - p2 : p1 + p2;
+   if (t > 0 && (hit.dist < 0 || t < hit.dist)) {
+      hit.dist = t;
+      hit.pos = ray.origin + (t * ray.direction);
+      hit.norm = normalize(hit.pos - sphere.pos);
+      hit.mat = sphere.mat;
+
+      if(hit.mat.roughness != 0) hit.norm = randomlyRotateVector(hit.norm, hit.mat.roughness * PI);
+   }
+}
+
+RayHit traceRay(Ray ray) {
+   RayHit hit = createRayHit();
+   for(int i = 0; i < nSpheres; i++) {
+      getSphereCollision(ray, spheres[i], hit);
+   }
+
+   getWaterCollision(ray, hit);
+
+   return hit;
+}
+
+vec3 shade(inout Ray ray, RayHit hit, bool ref) {
+   if(hit.dist < 0) {
+      vec3 color = getBackground(ray);
+      ray.direction = vec3(0);
+      return color;
+   }
+
+   if(ref && hit.mat.reflectiveness != 0) {
+      // Spawn a new ray
+      ray.origin = hit.pos + hit.norm * 0.01;
+      ray.direction = reflect(ray.direction, hit.norm);
+      ray.energy *= hit.mat.reflectiveness;
+   }
+
+   else if(!ref && hit.mat.refractiveness != 0) {
+      ray.origin = hit.pos - hit.norm * 0.01;
+      ray.direction = refract(ray.direction, hit.norm, hit.mat.refractiveIndex);
+      ray.energy *= hit.mat.refractiveness;
+   }
+
+   float diffuseVal = 1 - (hit.mat.reflectiveness);
+   vec3 color = hit.mat.color * diffuseVal;
+
+   Ray shadowRay = createRay(ray.origin, -directionalLight);
+   RayHit shadowHit = traceRay(shadowRay);
+   if(shadowHit.dist >= 0) return color * ambient;
+
+   float diffuse = clamp(dot(hit.norm, directionalLight) * -1, 0, 1);
+   float specular = pow(max(dot(-reflect(directionalLight, hit.norm), ray.direction) , 0.0), 8);
+   
+   return (ambient + (1 - ambient) * (diffuse + specular)) * color;
+}
+
+vec3 renderPixel() {
+   vec3 result = vec3(0);
+
+   for(int r = 0; r < raysPerPixel; r++) {
+      vec2 uv = (2 * (gl_GlobalInvocationID.xy + pixelNoise[r])/ dimensions) - 1; // [-1, 1]^2
+      Ray ray = createCameraRay(uv);
+
+      for(int i = 0; i < nPasses; i++) {
+         RayHit hit = traceRay(ray);
+         result += ray.energy * shade(ray, hit, mod(r, 2) == 0);
+
+         if(ray.direction == vec3(0)) break;
+      }
+   }
+
+   return result / raysPerPixel;
+}
+
+void main() {
+   addSphere(createSphere(vec3(-2, sin(time), 5), 0.5, createMaterial(vec3(0, 0.15, 0.65), 0, 0, 0, 0)));
+   addSphere(createSphere(vec3(2, 1, 5), 0.5, createMaterial(vec3(0.35, 0, 0), 0.7, 0, 0, 0)));
+   addSphere(createSphere(vec3(0, 1, 5), 0.5, createMaterial(vec3(0, 0.15, 0), 0.7, 0, 0, 0.2)));
+
+   vec3 color = renderPixel();
+
+   ivec2 textureCoords = ivec2(gl_GlobalInvocationID.xy);
+   imageStore(imgOut, textureCoords, vec4(color, 1));
+}

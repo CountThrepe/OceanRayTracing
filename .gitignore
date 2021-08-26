@@ -1,0 +1,6 @@
+*.zip
+
+# ignore build files
+*.o
+*.a
+*.exe
